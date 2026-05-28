@@ -6,132 +6,97 @@
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)
 ![Pandas](https://img.shields.io/badge/Pandas-150458?style=flat&logo=pandas&logoColor=white)
 
-> Predict whether a loan applicant will default — with explainable AI showing exactly why.
+---
+
+## Overview
+
+CreditIQ is an end-to-end machine learning project I built to predict whether a loan applicant is likely to default within two years. I trained the model on 150,000 real loan applications from Kaggle's Give Me Some Credit dataset and deployed it as an interactive Streamlit web app that scores new applicants in real time and explains every prediction using SHAP.
+
+The goal was not just to build a model that works, but to build one the way it would need to work in production — with correct pipeline ordering, no data leakage, meaningful evaluation metrics, and decisions that can be justified to a non-technical stakeholder.
 
 ---
 
-## 🧠 Overview
+## The Problem
 
-CreditIQ is an end-to-end machine learning pipeline trained on **150,000 real loan applications** from Kaggle's Give Me Some Credit dataset. It predicts the probability of serious delinquency within 2 years and uses **SHAP explainability** to surface the exact features driving each individual prediction.
-
-The project was built with production-quality practices — correct pipeline ordering to prevent data leakage, SMOTE for class imbalance, optimal threshold selection, 5-fold cross-validation, and XGBoost hyperparameter tuning via RandomizedSearchCV.
+Consumer lending is an inherently imbalanced problem. In this dataset, only 6.7% of applicants defaulted — a 14:1 imbalance. A naive model that predicts "no default" for everyone gets 93% accuracy while catching zero actual defaults, which is completely useless for a bank. The real challenge was building a model that meaningfully identifies the minority class while remaining interpretable enough to explain individual decisions.
 
 ---
 
-## ✨ Features
+## Data & Preprocessing
 
-- **Live Risk Predictor** — Enter applicant details and get an instant default probability with a risk gauge
-- **SHAP Explanations** — Per-prediction breakdown of which features increased or decreased risk
-- **EDA Dashboard** — Interactive charts exploring the dataset, class imbalance, and feature distributions
-- **Model Performance Page** — ROC curves, confusion matrix, and cross-validated AUC scores for all 3 models
-- **Leakage-Free Pipeline** — Split-first architecture ensuring test data never influences preprocessing
+The dataset contains 10 features covering credit utilization, payment history, debt ratios, income, and demographics. I found that roughly 20% of MonthlyIncome values and 2.5% of NumberOfDependents values were missing, and several columns had extreme outliers — DebtRatio had values in the hundreds of thousands, which are clearly data entry errors rather than real values.
 
----
+I imputed missing income values with the training set median and dependents with the training set mode. For outliers, I used domain knowledge rather than blind percentile capping — DebtRatio was capped at 10 (a ratio above this is not a real financial situation) and RevolvingUtilization at 2.0. MonthlyIncome used the 99th percentile of the training set.
 
-## 🗂️ Project Structure
-
-```
-creditiq/
-├── data/                        ← Download cs-training.csv here
-├── models/                      ← Auto-generated after training
-├── notebooks/
-│   ├── 01_eda.ipynb             ← Exploratory Data Analysis
-│   └── 02_modeling.ipynb        ← Training, evaluation & SHAP
-├── src/
-│   ├── preprocess.py            ← Leakage-free preprocessing pipeline
-│   └── train.py                 ← Full training pipeline with CV & tuning
-├── app.py                       ← Streamlit app (4 pages)
-└── requirements.txt
-```
+A critical design decision was the pipeline order. I split the data first, then fit all preprocessing statistics — imputation values, outlier caps, and the scaler — exclusively on the training set, saving them and applying the same values to the test set. This prevents data leakage through imputation and scaling, which is a subtle but serious bug that makes a model appear to perform better than it actually does.
 
 ---
 
-## 🤖 ML Pipeline
+## Feature Engineering
 
-```
-Raw Data (150k loan applications)
-        ↓
-Train/Test Split (stratified, 80/20)
-        ↓
-Imputation → Outlier Capping → Feature Engineering
-(all fit on train only — zero leakage)
-        ↓
-SMOTE Oversampling (14:1 → 3:1 ratio)
-        ↓
-Model Training with 5-Fold Cross-Validation
-Logistic Regression → Random Forest → XGBoost
-        ↓
-RandomizedSearchCV Hyperparameter Tuning (XGBoost)
-        ↓
-Optimal Threshold via Precision-Recall Curve
-        ↓
-SHAP Explainability (TreeExplainer)
-        ↓
-Streamlit App — Live Risk Scoring
-```
+I created two new features beyond the raw columns. **TotalPastDue** combines all three delinquency severity columns — 30–59 days, 60–89 days, and 90+ days late — into a single count capturing overall payment behaviour. The individual columns were correlated with each other and collectively represented the same underlying signal.
+
+I also added a **HasDependents** binary flag indicating whether the applicant has any financial dependents. I initially built an IncomePerDependent ratio but removed it — dividing by (dependents + 1) to avoid zero division distorts the feature for the majority of applicants who have no dependents, creating a systematic error. A clean binary flag captures the meaningful signal without mathematical artifacts.
 
 ---
 
-## 📊 Model Results
+## Handling Class Imbalance
 
-| Model | CV AUC (mean ± std) | Test AUC |
-|-------|---------------------|----------|
-| Dummy Baseline | ~0.500 | ~0.500 |
-| Logistic Regression | — | — |
-| Random Forest | — | — |
-| **XGBoost (tuned)** | **—** | **—** |
+I applied SMOTE — Synthetic Minority Oversampling Technique — to the training data. Rather than duplicating existing default samples, SMOTE creates synthetic ones by interpolating between real minority class examples in feature space. I used a sampling strategy of 0.3, bringing the minority class to 30% of the majority rather than full 1:1 balance. Fully balancing the classes tends to hurt precision on credit data because too many synthetic defaults push the decision boundary in unrealistic directions.
 
-> Run `python src/train.py` to populate your actual results.
+I applied SMOTE inside each cross-validation fold rather than before splitting, ensuring synthetic samples never leak into validation sets.
 
 ---
 
-## 🔑 Key Engineering Decisions
+## Modeling
 
-**Data Leakage Prevention**
-The pipeline splits data first, then fits all preprocessing statistics (imputation medians, outlier caps, scaler) exclusively on the training set. The same saved statistics are applied to the test set — the test set never influences any computation.
+I trained three models in order of complexity — Logistic Regression as a linear baseline, Random Forest, and XGBoost. I included a DummyClassifier to confirm all three are genuinely learning from the data rather than exploiting class distribution.
 
-**Class Imbalance**
-The dataset has a 14:1 imbalance (93.3% non-default). A naive model that always predicts no-default gets 93% accuracy but catches zero actual defaults. SMOTE generates synthetic minority samples to give the model meaningful signal on the rare positive class.
+For XGBoost I ran a RandomizedSearchCV over six hyperparameters — n_estimators, max_depth, learning_rate, subsample, colsample_bytree, and min_child_weight — with 5-fold stratified cross-validation over 20 random combinations. I report mean ± standard deviation AUC across folds rather than a single split score, which gives a more honest estimate of generalisation.
 
-**Threshold Selection**
-Default threshold of 0.5 is suboptimal for imbalanced data. The optimal threshold is found by maximising F1 on the Precision-Recall curve and saved for use in the app.
-
-**SHAP Explainability**
-Feature importance tells you what matters globally. SHAP tells you why a specific prediction was made — which features pushed this applicant's risk up and by how much. Critical for finance applications where decisions must be justifiable.
+I used ROC-AUC as the primary metric rather than accuracy, since accuracy is meaningless for imbalanced classification. I also tracked Average Precision — the area under the Precision-Recall curve — which is more informative than ROC-AUC when the positive class is rare, because it does not reward correct identification of the majority class.
 
 ---
 
-## 🛠️ Tech Stack
+## Threshold Selection
+
+The default 0.5 classification threshold is almost never optimal for imbalanced problems. I found the optimal threshold by computing F1 across every threshold on the Precision-Recall curve and selecting the point that maximises it. This threshold is saved and used by the Streamlit app for all predictions rather than defaulting to 0.5.
+
+---
+
+## Explainability
+
+Feature importance tells you which features matter globally across the entire model. It cannot tell you why a specific applicant received a high risk score. I used SHAP — SHapley Additive exPlanations — to generate per-prediction explanations, assigning each feature a contribution value that shows how much it pushed the probability toward or away from default for that specific individual.
+
+For a finance application this is not optional — it is what makes the model auditable. A bank needs to be able to tell an applicant which factors drove a rejection decision, and risk teams need to verify the model is not discriminating through proxy variables.
+
+---
+
+## Results
+
+| Model | Test AUC |
+|-------|----------|
+| Dummy Baseline | ~0.500 |
+| Logistic Regression | — |
+| Random Forest | — |
+| **XGBoost (tuned)** | **—** |
+
+---
+
+## Application
+
+The Streamlit app has four pages. The home page shows the dataset and pipeline overview. The EDA dashboard has interactive charts for class distribution, feature distributions by default status, default rate by age group, and the full correlation heatmap. The model performance page shows ROC curves, confusion matrix, and the SHAP summary plot. The live predictor accepts applicant inputs and returns a default probability, a risk gauge, and a SHAP bar chart explaining exactly which features drove the prediction.
+
+---
+
+## Tech Stack
 
 | Category | Tools |
 |----------|-------|
 | Data | Pandas, NumPy |
-| ML | Scikit-learn, XGBoost, imbalanced-learn (SMOTE) |
+| ML | Scikit-learn, XGBoost, imbalanced-learn |
 | Explainability | SHAP |
 | Visualisation | Plotly, Matplotlib, Seaborn |
 | App | Streamlit |
-| Tracking | Python logging, JSON results |
 
 ---
-
-## 📦 Dataset
-
-**Give Me Some Credit** — Kaggle (2011)
-150,000 loan applicants · 10 features · Binary target (serious delinquency within 2 years)
-
-| Column | Description |
-|--------|-------------|
-| `SeriousDlqin2yrs` | **Target** — defaulted within 2 years |
-| `RevolvingUtilizationOfUnsecuredLines` | Credit card usage ratio |
-| `age` | Borrower age |
-| `NumberOfTime30-59DaysPastDueNotWorse` | Times 30–59 days late |
-| `DebtRatio` | Monthly debt / monthly income |
-| `MonthlyIncome` | Monthly income |
-| `NumberOfOpenCreditLinesAndLoans` | Open credit lines |
-| `NumberOfTimes90DaysLate` | Times 90+ days late |
-| `NumberRealEstateLoansOrLines` | Real estate loans |
-| `NumberOfTime60-89DaysPastDueNotWorse` | Times 60–89 days late |
-| `NumberOfDependents` | Dependents in family |
-
----
-
