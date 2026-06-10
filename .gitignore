@@ -3,7 +3,7 @@ data/
 *.csv
 
 # Trained models
-models/*.pkl
+#models/*.pkl
 models/*.json
 
 # Python
@@ -11,7 +11,7 @@ __pycache__/
 *.py[cod]
 *.egg-info/
 .env
-*.npy
+#*.npy
 *.pyc
 *.log
 venv/
