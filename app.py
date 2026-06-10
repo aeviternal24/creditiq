@@ -59,10 +59,17 @@ st.markdown("""
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data
 def load_dataset():
-    path = "data/cs-training.csv"
-    if not os.path.exists(path):
+    # Use full dataset if available, fall back to sample for deployment
+    if os.path.exists("data/cs-training.csv"):
+        path = "data/cs-training.csv"
+    elif os.path.exists("data/sample.csv"):
+        path = "data/sample.csv"
+    else:
         return None
     df = pd.read_csv(path, index_col=0)
+    df["MonthlyIncome"]      = df["MonthlyIncome"].fillna(df["MonthlyIncome"].median())
+    df["NumberOfDependents"] = df["NumberOfDependents"].fillna(df["NumberOfDependents"].mode()[0])
+    return df
     # Clean for display
     df["MonthlyIncome"]      = df["MonthlyIncome"].fillna(df["MonthlyIncome"].median())
     df["NumberOfDependents"] = df["NumberOfDependents"].fillna(df["NumberOfDependents"].mode()[0])
@@ -161,8 +168,9 @@ elif page == "🔍 EDA Dashboard":
 
     df = load_dataset()
     if df is None:
-        st.warning("Dataset not found. Please download `cs-training.csv` and place it in `data/`.")
+        st.warning("Dataset not found.")
         st.stop()
+    st.caption("⚠️ Showing sample of 2,000 rows on deployed version. Full dataset has 150,000 rows.")
 
     # ── Class Imbalance ──────────────────────────────────────────────────────
     st.markdown("### Class Distribution (Target Variable)")
