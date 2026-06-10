@@ -13,7 +13,7 @@ __pycache__/
 .env
 #*.npy
 *.pyc
-*.log
+#*.log
 venv/
 .venv/
 
