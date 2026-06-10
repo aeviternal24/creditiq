@@ -2,10 +2,10 @@
 app.py — CreditIQ Streamlit Application
 =========================================
 4 pages:
-  1. 🏠 Home        — project overview & dataset stats
-  2. 🔍 EDA         — interactive charts
-  3. 📊 Model       — performance metrics & SHAP summary
-  4. 🧪 Predictor   — live risk scoring for a new applicant
+  1. Home        — project overview & dataset stats
+  2. EDA         — interactive charts (uses sample.csv on deployment)
+  3. Model       — performance metrics & SHAP summary
+  4. Predictor   — live risk scoring for a new applicant
 
 Run: streamlit run app.py
 """
@@ -34,9 +34,6 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Global styles
-# ─────────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     .metric-card {
@@ -49,7 +46,6 @@ st.markdown("""
     .risk-low    { color: #27ae60; font-size: 2rem; font-weight: bold; }
     .risk-medium { color: #f39c12; font-size: 2rem; font-weight: bold; }
     .risk-high   { color: #e74c3c; font-size: 2rem; font-weight: bold; }
-    h1 { color: #2c3e50; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,18 +58,16 @@ def load_dataset():
     # Use full dataset if available, fall back to sample for deployment
     if os.path.exists("data/cs-training.csv"):
         path = "data/cs-training.csv"
+        is_sample = False
     elif os.path.exists("data/sample.csv"):
         path = "data/sample.csv"
+        is_sample = True
     else:
-        return None
+        return None, False
     df = pd.read_csv(path, index_col=0)
     df["MonthlyIncome"]      = df["MonthlyIncome"].fillna(df["MonthlyIncome"].median())
     df["NumberOfDependents"] = df["NumberOfDependents"].fillna(df["NumberOfDependents"].mode()[0])
-    return df
-    # Clean for display
-    df["MonthlyIncome"]      = df["MonthlyIncome"].fillna(df["MonthlyIncome"].median())
-    df["NumberOfDependents"] = df["NumberOfDependents"].fillna(df["NumberOfDependents"].mode()[0])
-    return df
+    return df, is_sample
 
 
 @st.cache_resource
@@ -82,13 +76,18 @@ def load_model_artifacts():
                 "models/feature_names.pkl", "models/results.json"]
     for path in required:
         if not os.path.exists(path):
-            return None, None, None, None
-    model        = joblib.load("models/best_model.pkl")
-    scaler       = joblib.load("models/scaler.pkl")
+            return None, None, None, None, None
+    model         = joblib.load("models/best_model.pkl")
+    scaler        = joblib.load("models/scaler.pkl")
     feature_names = joblib.load("models/feature_names.pkl")
     with open("models/results.json") as f:
         results = json.load(f)
-    return model, scaler, feature_names, results
+    # Load optimal threshold if available, fall back to 0.5
+    if os.path.exists("models/optimal_threshold.pkl"):
+        threshold = joblib.load("models/optimal_threshold.pkl")
+    else:
+        threshold = 0.5
+    return model, scaler, feature_names, results, threshold
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -130,14 +129,14 @@ if page == "🏠 Home":
     st.markdown("### 🔄 Pipeline Overview")
 
     steps = [
-        ("📥 Raw Data", "150k loan applications from Kaggle"),
-        ("🧹 Preprocessing", "Fill missing values, cap outliers"),
-        ("⚙️ Feature Engineering", "TotalPastDue, IncomePerDependent, AgeGroup"),
-        ("⚖️ SMOTE", "Fix 14:1 class imbalance"),
-        ("🤖 Modeling", "LogReg → Random Forest → XGBoost"),
-        ("📊 Evaluation", "ROC-AUC, Precision-Recall, Confusion Matrix"),
-        ("🔍 SHAP", "Explain every individual prediction"),
-        ("🚀 Deployment", "Streamlit app — real-time scoring"),
+        ("📥 Raw Data",            "150k loan applications from Kaggle"),
+        ("🧹 Preprocessing",       "Fill missing values, cap outliers"),
+        ("⚙️ Feature Engineering", "TotalPastDue, HasDependents"),
+        ("⚖️ SMOTE",               "Fix 14:1 class imbalance"),
+        ("🤖 Modeling",            "LogReg → Random Forest → XGBoost"),
+        ("📊 Evaluation",          "ROC-AUC, Precision-Recall, Confusion Matrix"),
+        ("🔍 SHAP",                "Explain every individual prediction"),
+        ("🚀 Deployment",          "Streamlit app — real-time scoring"),
     ]
 
     cols = st.columns(4)
@@ -152,8 +151,11 @@ if page == "🏠 Home":
 
     st.divider()
     st.markdown("### 📂 Dataset: Give Me Some Credit (Kaggle)")
-    df = load_dataset()
+    result = load_dataset()
+    df, is_sample = result if result[0] is not None else (None, False)
     if df is not None:
+        if is_sample:
+            st.caption("⚠️ Showing a 2,000-row sample. Full dataset has 150,000 rows.")
         st.dataframe(df.head(10), use_container_width=True)
     else:
         st.warning("Dataset not found. Download `cs-training.csv` from Kaggle and place it in `data/`.")
@@ -166,11 +168,15 @@ if page == "🏠 Home":
 elif page == "🔍 EDA Dashboard":
     st.title("🔍 Exploratory Data Analysis")
 
-    df = load_dataset()
+    result = load_dataset()
+    df, is_sample = result if result[0] is not None else (None, False)
+
     if df is None:
         st.warning("Dataset not found.")
         st.stop()
-    st.caption("⚠️ Showing sample of 2,000 rows on deployed version. Full dataset has 150,000 rows.")
+
+    if is_sample:
+        st.info("📊 Showing analysis on a 2,000-row sample. Trends are representative of the full 150,000-row dataset.")
 
     # ── Class Imbalance ──────────────────────────────────────────────────────
     st.markdown("### Class Distribution (Target Variable)")
@@ -260,13 +266,14 @@ elif page == "🔍 EDA Dashboard":
     st.divider()
     st.markdown("### Correlation Heatmap")
 
-    corr = df.drop(columns=["AgeGroup"]).corr(numeric_only=True)
+    corr = df.drop(columns=["AgeGroup"], errors="ignore").corr(numeric_only=True)
     fig, ax = plt.subplots(figsize=(10, 7))
     mask = np.triu(np.ones_like(corr, dtype=bool))
     sns.heatmap(corr, mask=mask, annot=True, fmt=".2f",
                 cmap="RdYlGn", center=0, ax=ax, linewidths=0.5)
     ax.set_title("Feature Correlation Heatmap")
     st.pyplot(fig)
+    plt.close()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -275,23 +282,20 @@ elif page == "🔍 EDA Dashboard":
 elif page == "📊 Model Performance":
     st.title("📊 Model Performance")
 
-    model, scaler, feature_names, results_data = load_model_artifacts()
+    model, scaler, feature_names, results_data, threshold = load_model_artifacts()
     if model is None:
         st.warning("Model not trained yet. Run `python src/train.py` first.")
         st.code("python src/train.py")
         st.stop()
 
-    results = results_data["results"]
+    results   = results_data["results"]
     best_name = results_data["best_model"]
 
     # ── Model Comparison ─────────────────────────────────────────────────────
     st.markdown("### Model Comparison")
-    metrics_df = pd.DataFrame(results).T.reset_index()
-    metrics_df.columns = ["Model"] + list(metrics_df.columns[1:])
-
     col1, col2, col3 = st.columns(3)
     for i, (name, data) in enumerate(results.items()):
-        col = [col1, col2, col3][i]
+        col = [col1, col2, col3][i % 3]
         is_best = name == best_name
         col.metric(
             label=f"{'🏆 ' if is_best else ''}{name}",
@@ -300,14 +304,18 @@ elif page == "📊 Model Performance":
 
     st.dataframe(
         pd.DataFrame(results).T.rename(columns={
-            "auc": "ROC-AUC",
-            "avg_precision": "Avg Precision",
-            "recall_default": "Recall (Default)",
+            "auc":               "ROC-AUC",
+            "avg_precision":     "Avg Precision",
+            "recall_default":    "Recall (Default)",
             "precision_default": "Precision (Default)",
-            "f1_default": "F1 (Default)"
+            "f1_default":        "F1 (Default)"
         }),
         use_container_width=True
     )
+
+    st.divider()
+    st.markdown(f"**Optimal Classification Threshold:** `{threshold:.3f}`")
+    st.caption("Found by maximising F1 on the Precision-Recall curve. Used in the Live Predictor.")
 
     # ── SHAP Summary ─────────────────────────────────────────────────────────
     st.divider()
@@ -316,16 +324,16 @@ elif page == "📊 Model Performance":
 
     if os.path.exists("models/shap_summary.png"):
         st.image("models/shap_summary.png", use_column_width=True)
-    elif os.path.exists("models/shap_values.npy"):
+    elif os.path.exists("models/shap_values.npy") and os.path.exists("models/X_sample.npy"):
         shap_values = np.load("models/shap_values.npy")
         X_sample    = np.load("models/X_sample.npy")
         fig, ax = plt.subplots(figsize=(10, 6))
         shap.summary_plot(shap_values, X_sample, feature_names=feature_names, show=False)
         st.pyplot(fig)
+        plt.close()
     else:
-        st.info("Run the full training pipeline to generate SHAP plots.")
+        st.info("SHAP plot not available. Retrain the model to generate it.")
 
-    # ── How to read SHAP ─────────────────────────────────────────────────────
     st.divider()
     st.markdown("""
     ### 📖 How to Read SHAP Values
@@ -337,10 +345,6 @@ elif page == "📊 Model Performance":
     | **Negative SHAP** | Pushes prediction toward NO DEFAULT ↓ |
     | **Dot color (red)** | High feature value |
     | **Dot color (blue)** | Low feature value |
-
-    **Example interpretation:**
-    > "High RevolvingUtilization (red dot, positive SHAP) → increases default risk"
-    > "High Age (red dot, negative SHAP) → decreases default risk"
     """)
 
 
@@ -351,7 +355,7 @@ elif page == "🧪 Live Predictor":
     st.title("🧪 Live Default Risk Predictor")
     st.markdown("Enter an applicant's details to get their default risk score and explanation.")
 
-    model, scaler, feature_names, results_data = load_model_artifacts()
+    model, scaler, feature_names, results_data, threshold = load_model_artifacts()
     if model is None:
         st.warning("Model not trained yet. Run `python src/train.py` first.")
         st.code("python src/train.py")
@@ -359,9 +363,7 @@ elif page == "🧪 Live Predictor":
 
     st.divider()
 
-    # ── Input Form ───────────────────────────────────────────────────────────
     col1, col2 = st.columns(2)
-
     with col1:
         st.markdown("#### 👤 Personal Info")
         age         = st.slider("Age", 18, 90, 35)
@@ -370,55 +372,47 @@ elif page == "🧪 Live Predictor":
 
     with col2:
         st.markdown("#### 💳 Credit Profile")
-        revolving   = st.slider("Revolving Credit Utilization (0-1)", 0.0, 1.5, 0.3, step=0.01)
-        debt_ratio  = st.slider("Debt Ratio", 0.0, 5.0, 0.35, step=0.01)
-        open_loans  = st.number_input("Open Credit Lines & Loans", 0, 50, 8)
-        re_loans    = st.number_input("Real Estate Loans", 0, 20, 1)
+        revolving  = st.slider("Revolving Credit Utilization (0-1)", 0.0, 1.5, 0.3, step=0.01)
+        debt_ratio = st.slider("Debt Ratio", 0.0, 5.0, 0.35, step=0.01)
+        open_loans = st.number_input("Open Credit Lines & Loans", 0, 50, 8)
+        re_loans   = st.number_input("Real Estate Loans", 0, 20, 1)
 
     st.markdown("#### ⚠️ Delinquency History")
     col3, col4, col5 = st.columns(3)
     past_30 = col3.number_input("Times 30-59 Days Late", 0, 20, 0)
     past_60 = col4.number_input("Times 60-89 Days Late", 0, 20, 0)
-    past_90 = col5.number_input("Times 90+ Days Late", 0, 20, 0)
+    past_90 = col5.number_input("Times 90+ Days Late",   0, 20, 0)
 
     st.divider()
 
-    # ── Prediction ───────────────────────────────────────────────────────────
     if st.button("🔮 Predict Default Risk", type="primary", use_container_width=True):
 
-        # Build feature vector (must match training features)
-        total_past_due       = past_30 + past_60 + past_90
-        income_per_dependent = monthly_inc / (dependents + 1)
-        age_group = pd.cut([age], bins=[0, 25, 35, 50, 65, 120], labels=[0, 1, 2, 3, 4])[0]
+        total_past_due  = past_30 + past_60 + past_90
+        has_dependents  = 1 if dependents > 0 else 0
 
         raw_features = {
-            "RevolvingUtilizationOfUnsecuredLines": revolving,
-            "age": age,
-            "NumberOfTime30-59DaysPastDueNotWorse": past_30,
-            "DebtRatio": debt_ratio,
-            "MonthlyIncome": monthly_inc,
-            "NumberOfOpenCreditLinesAndLoans": open_loans,
-            "NumberOfTimes90DaysLate": past_90,
-            "NumberRealEstateLoansOrLines": re_loans,
-            "NumberOfTime60-89DaysPastDueNotWorse": past_60,
-            "NumberOfDependents": dependents,
-            "TotalPastDue": total_past_due,
-            "IncomePerDependent": income_per_dependent,
-            "AgeGroup": int(age_group),
+            "RevolvingUtilizationOfUnsecuredLines":  revolving,
+            "age":                                   age,
+            "NumberOfTime30-59DaysPastDueNotWorse":  past_30,
+            "DebtRatio":                             debt_ratio,
+            "MonthlyIncome":                         monthly_inc,
+            "NumberOfOpenCreditLinesAndLoans":       open_loans,
+            "NumberOfTimes90DaysLate":               past_90,
+            "NumberRealEstateLoansOrLines":          re_loans,
+            "NumberOfTime60-89DaysPastDueNotWorse":  past_60,
+            "NumberOfDependents":                    dependents,
+            "TotalPastDue":                          total_past_due,
+            "HasDependents":                         has_dependents,
         }
 
-        # Keep only features model was trained on
-        input_values = [raw_features[f] for f in feature_names]
-        X_input = np.array(input_values).reshape(1, -1)
-        X_scaled = scaler.transform(X_input)
+        input_values = [raw_features.get(f, 0) for f in feature_names]
+        X_input      = np.array(input_values).reshape(1, -1)
+        X_scaled     = scaler.transform(X_input)
 
-        # Predict
         prob = model.predict_proba(X_scaled)[0][1]
 
         # ── Risk Display ─────────────────────────────────────────────────────
-        st.markdown("---")
         col1, col2, col3 = st.columns([1, 2, 1])
-
         with col2:
             if prob < 0.25:
                 risk_label = "LOW RISK"
@@ -470,7 +464,6 @@ elif page == "🧪 Live Predictor":
 
         # ── SHAP Explanation ─────────────────────────────────────────────────
         st.markdown("### 🔍 Why this prediction?")
-        st.markdown("SHAP values show which factors pushed the risk UP or DOWN for this specific applicant.")
 
         try:
             if os.path.exists("models/explainer.pkl"):
@@ -478,36 +471,34 @@ elif page == "🧪 Live Predictor":
             else:
                 explainer = shap.TreeExplainer(model)
 
-            shap_vals = explainer.shap_values(X_scaled)[0]
-            expected  = explainer.expected_value
+            shap_vals = explainer.shap_values(X_scaled)
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[1]
+            shap_vals = shap_vals[0]
 
-            # Build contribution table
             shap_df = pd.DataFrame({
-                "Feature": feature_names,
-                "Value": input_values,
+                "Feature":    feature_names,
+                "Value":      [round(v, 3) for v in input_values],
                 "SHAP Value": shap_vals,
-                "Direction": ["↑ Higher Risk" if v > 0 else "↓ Lower Risk" for v in shap_vals]
+                "Direction":  ["↑ Higher Risk" if v > 0 else "↓ Lower Risk" for v in shap_vals]
             })
             shap_df = shap_df.reindex(shap_df["SHAP Value"].abs().sort_values(ascending=False).index)
             shap_df["SHAP Value"] = shap_df["SHAP Value"].round(4)
-            shap_df["Value"] = shap_df["Value"].round(3)
 
-            # Color-coded bar chart
             colors_list = ["#e74c3c" if v > 0 else "#27ae60" for v in shap_df["SHAP Value"]]
             fig, ax = plt.subplots(figsize=(9, 5))
             ax.barh(shap_df["Feature"], shap_df["SHAP Value"], color=colors_list, edgecolor="white")
             ax.axvline(0, color="black", linewidth=0.8)
             ax.set_xlabel("SHAP Value (impact on prediction)")
-            ax.set_title("Feature Contributions to This Prediction\n(Red = increases risk, Green = decreases risk)")
+            ax.set_title("Feature Contributions\n(Red = increases risk, Green = decreases risk)")
             ax.spines["top"].set_visible(False)
             ax.spines["right"].set_visible(False)
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close()
 
-            # Show table
             st.markdown("#### Feature Breakdown")
             st.dataframe(shap_df, use_container_width=True, hide_index=True)
 
         except Exception as e:
-            st.info("SHAP explanation not available. Make sure you trained with `python src/train.py`.")
-            st.caption(str(e))
+            st.info(f"SHAP explanation unavailable: {str(e)}")
