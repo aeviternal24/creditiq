@@ -473,8 +473,12 @@ elif page == "🧪 Live Predictor":
 
             shap_vals = explainer.shap_values(X_scaled)
             if isinstance(shap_vals, list):
-                shap_vals = shap_vals[1]
-            shap_vals = shap_vals[0]
+                shap_vals = np.array(shap_vals[1])
+            elif hasattr(shap_vals, 'values'):
+                shap_vals = shap_vals.values
+            else:
+                shap_vals = np.array(shap_vals)
+            shap_vals = shap_vals.flatten()
 
             shap_df = pd.DataFrame({
                 "Feature":    feature_names,
